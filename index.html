@@ -14,6 +14,9 @@
     touch-action: manipulation;
   }
   canvas {
+    image-rendering: -moz-crisp-edges;
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
     display: block;
     background: #222;
     margin: 0 auto;
@@ -56,6 +59,10 @@
     font-size: 24px;
     display: none;
     z-index: 5;
+    transition: transform 0.2s ease-out;
+  }
+  #score.bounce {
+  transform: translateX(-50%) scale(1.1);
   }
   /* Мобильные кнопки управления */
   #mobileControls {
@@ -78,9 +85,18 @@
   #mobileControls button:active {
     background: rgba(106, 13, 173, 1);
   }
+#lives {
+  color: red;
+  font-weight: bold;
+  text-shadow: 1px 1px 2px black;
+  display: flex;
+  gap: 5px;
+  align-items: center;
+}
 </style>
 </head>
 <body>
+<div id="livesCount" style="position: fixed; top: 10px; left: 10px; font-size: 24px;"></div>
 
 <div id="startScreen">
   <button id="startBtn">Старт</button>
@@ -110,9 +126,31 @@
 const canvas = document.getElementById('gameCanvas');
 const ctx = canvas.getContext('2d');
 
-let scale = 1;  // масштаб для canvas
-const BASE_WIDTH = 480;  // базовая ширина для расчёта масштаба
-const BASE_HEIGHT = 800; // базовая высота для расчёта масштаба
+let scale = 1;
+const BASE_WIDTH = 960;
+const BASE_HEIGHT = 800;
+
+function resize() {
+  const scaleX = window.innerWidth / BASE_WIDTH;
+  const scaleY = window.innerHeight / BASE_HEIGHT;
+  scale = Math.max(0.5, Math.min(scaleX, scaleY));
+  canvas.style.transform = `translate(-50%, -50%) scale(${scale})`;
+  canvas.width = BASE_WIDTH;
+  canvas.height = BASE_HEIGHT;
+}
+resize();
+window.addEventListener('resize', resize);
+
+// Теперь объявляем размеры после инициализации canvas
+const WIDTH = canvas.width;
+const HEIGHT = canvas.height;
+let visualScore = 0; // Для плавного отображения
+let scoreAnimationFrame = null; // Для анимации счета
+let totalHeight = 0; // Общая высота подъема в игровом мире
+const heightScoreMultiplier = 0.1; // Множитель для очков
+const SCORE_SPEED = 0.3; // Скорость плавного начисления (0.1-1)
+let lastPlayerY = HEIGHT;
+
 
 function resize() {
   const scaleX = window.innerWidth / BASE_WIDTH;
@@ -125,12 +163,11 @@ function resize() {
 resize();
 window.addEventListener('resize', resize);
 
-const WIDTH = canvas.width;
-const HEIGHT = canvas.height;
-
 let gameStarted = false;
 let gameOver = false;
 let score = 0;
+let maxHeight = HEIGHT; // Изначально равна нижней границе (игрок стартует внизу)
+let scorePerPixel = 0.5; // Сколько очков давать за 1 пиксель высоты
 const scoreDiv = document.getElementById('score');
 
 const startScreen = document.getElementById('startScreen');
@@ -146,71 +183,77 @@ class Platform {
     this.width = 90;
     this.height = 30;
     this.isDestructible = isDestructible;
-
-    this.timerStarted = false;
-    this.timer = 0;
-    this.lifetime = 10;
-
-    this.damageProgress = 0;
+    this.destroyTime = 7;
+    this.destroyTimer = 0;
+    this.isDestroying = false;
+    this.damageProgress = 0; // Добавляем инициализацию
   }
 
-  startTimer() {
-    if (this.isDestructible && !this.timerStarted) {
-      this.timerStarted = true;
-      this.timer = 0;
+  startDestruction() {
+    if (this.isDestructible && !this.isDestroying) {
+      this.isDestroying = true;
+      this.destroyTimer = 0;
+      this.damageProgress = 0;
     }
   }
 
-  update(deltaTime, playerOn) {
-    if (this.isDestructible && this.timerStarted) {
-      this.timer += deltaTime;
-      this.damageProgress = Math.min(this.timer / this.lifetime, 1);
-      if (this.timer >= this.lifetime) {
-        return true;
-      }
+  update(deltaTime) {
+    if (!this.isDestructible || !this.isDestroying) return false;
+    
+    this.destroyTimer += deltaTime;
+    this.damageProgress = Math.min(1, this.destroyTimer / this.destroyTime);
+    if (this.damageProgress > 0.7 && player.currentPlatform === this) {
+    player.vy = -player.jumpPower * 0.6;
+    player.currentPlatform = null;
     }
-    if (playerOn && this.isDestructible && !this.timerStarted) {
-      this.startTimer();
-    }
-    return false;
+    return this.destroyTimer >= this.destroyTime;
   }
 
-  draw() {
+  draw(isCurrentPlatform) { // Принимаем параметр - является ли текущей
+    // Основной цвет
+    if (this.isDestructible && this.damageProgress >= 1) return;
+    // Эффект дрожания
+    const shakeOffset = this.isDestroying && this.damageProgress > 0.7 ? 
+        (Math.random() - 0.5) * 3 * this.damageProgress : 0;
+        ctx.save();
+    ctx.translate(shakeOffset, 0);
     if (this.isDestructible) {
-      // Серый цвет от светло-серого к тёмно-серому при разрушении
-      const baseGray = 180;
-      const damagedGray = 100;
-      const grayValue = Math.floor(baseGray * (1 - this.damageProgress) + damagedGray * this.damageProgress);
-      ctx.fillStyle = `rgb(${grayValue}, ${grayValue}, ${grayValue})`;
+      const grayValue = 180 - Math.floor(80 * this.damageProgress);
+      ctx.fillStyle = `rgb(${grayValue},${grayValue},${grayValue})`;
     } else {
       ctx.fillStyle = '#4caf50';
     }
-
+    // Рисуем основу
     ctx.beginPath();
-    ctx.ellipse(this.x + this.width / 2, this.y + this.height / 2,
-                this.width / 2, this.height / 2, 0, 0, Math.PI * 2);
+    ctx.ellipse(this.x + this.width/2, this.y + this.height/2,
+                this.width/2, this.height/2, 0, 0, Math.PI*2);
     ctx.fill();
 
-    if (this.isDestructible && this.damageProgress > 0) {
-      ctx.strokeStyle = `rgba(139,0,0, ${this.damageProgress})`;
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      let crackX = this.x + this.width / 4;
-      let crackY = this.y + this.height / 4;
-      ctx.moveTo(crackX, crackY);
-      ctx.lineTo(crackX + this.width / 2 * this.damageProgress, crackY + this.height / 2 * this.damageProgress);
-      ctx.moveTo(crackX + this.width / 2 * this.damageProgress, crackY);
-      ctx.lineTo(crackX, crackY + this.height / 2 * this.damageProgress);
-      ctx.stroke();
-    }
-
-    ctx.fillStyle = '#fff';
-    ctx.font = '12px Arial';
-    ctx.textAlign = 'center';
-    ctx.fillText('SOJU', this.x + this.width / 2, this.y + this.height / 2 + 5);
-  }
+    // Таймер и трещины только для текущей разрушаемой платформы
+    // Таймер и трещины для текущей разрушаемой платформы
+  if (this.isDestructible && this.isDestroying && isCurrentPlatform) {
+    // Трещины
+    ctx.strokeStyle = `rgba(139,0,0,${this.damageProgress})`;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(this.x + this.width/2, this.y + 5);
+    ctx.lineTo(this.x + this.width/2, this.y + this.height - 5);
+    ctx.moveTo(this.x + 5, this.y + this.height/2);
+    ctx.lineTo(this.x + this.width - 5, this.y + this.height/2);
+    ctx.stroke();
+    
+    // Таймер (всегда виден для текущей платформы)
+    ctx.fillStyle = 'red';
+    ctx.font = 'bold 16px Arial';
+    const timeLeft = Math.max(0, this.destroyTime - this.destroyTimer);
+    ctx.fillText(
+      timeLeft.toFixed(1),
+      this.x + this.width/2,
+      this.y - 10
+    );
+  }ctx.restore();
 }
-
+}
 
 
 class Player {
@@ -225,96 +268,492 @@ class Player {
     this.jumpPower = 600;
     this.speedX = 500;
     this.onPlatform = false;
-    this.firstJumpDone = false; // для автопрыжка после первого прыжка
+    this.canJump = true; // Добавляем флаг возможности прыжка
+    this.hasJumpedOnce = false;
+    this.currentPlatform = null;
+    this.wasOnPlatform = false;
+    this.maxFallThroughTime = 0.2; 
+    this.lives = 3; // Добавляем 3 жизни
+    this.hearts = [];
+    this.initHearts();
+    this.invulnerable = false;
+    this.invulnerableTimer = 0;
+    this.invulnerableDuration = 1.5;
   }
-  draw() {
-    ctx.fillStyle = 'black';
-    ctx.fillRect(this.x + 10, this.y + 20, 40, 60);
+  initHearts() {
+    const heartSize = 24;
+    const rightMargin = 30;
+    const topMargin = 30;
+    const spacing = 10;
+    
+    for (let i = 0; i < this.lives; i++) {
+      this.hearts.push({
+        x: WIDTH - rightMargin - (i * (heartSize + spacing)),
+        y: topMargin,
+        size: heartSize,
+        visible: true
+      });
+    }
+  }
+  loseLife() {
+    if (!this.invulnerable) {
+      this.lives--;
+      this.invulnerable = true;
+      this.invulnerableTimer = 0;
+      // Эффект мигания при получении урона
+      this.blinkEffect = true;
+      return true; // Возвращаем true, если жизнь была потеряна
+    }
+    return false;
+  }
+   draw() {
+        ctx.save();
+        
+        // Эффект повреждения (мигание)
+        if (this.invulnerable && Math.floor(this.invulnerableTimer * 10) % 2 === 0) {
+            ctx.globalAlpha = 0.5;
+        }
 
-    ctx.fillStyle = 'white';
-    ctx.font = '12px Arial';
-    ctx.textAlign = 'center';
-    ctx.fillText('НОРНИКЕЛЬ', this.x + 30, this.y + 70);
+        // ### Анатомически правильные пропорции ###
+        const headRadius = 12;
+        const neckLength = 5;
+        const shoulderWidth = 30;
+        const armLength = 25;
+        const torsoHeight = 30;
+        const legLength = 40;
 
-    ctx.fillStyle = '#f3d19c';
+        // ### Голова ###
+        // Лицо (овальное)
+        ctx.fillStyle = '#F5D6B3'; // Цвет кожи
+        ctx.beginPath();
+        ctx.ellipse(
+            this.x + 30, 
+            this.y + headRadius, 
+            headRadius, 
+            headRadius * 1.2, 
+            0, 0, Math.PI * 2
+        );
+        ctx.fill();
+
+        // Волосы (под кепкой)
+        ctx.fillStyle = '#2A190E';
+        ctx.beginPath();
+        ctx.arc(
+            this.x + 30, 
+            this.y + headRadius, 
+            headRadius, 
+            Math.PI * 0.9, 
+            Math.PI * 2.1
+        );
+        ctx.fill();
+
+        // ### Кепка РЖД (детализированная) ###
+        ctx.fillStyle = '#1A3A8F';
+        // Козырёк
+        ctx.beginPath();
+        ctx.moveTo(this.x + 15, this.y + headRadius + 3);
+        ctx.lineTo(this.x + 45, this.y + headRadius + 3);
+        ctx.lineTo(this.x + 42, this.y + headRadius);
+        ctx.lineTo(this.x + 18, this.y + headRadius);
+        ctx.closePath();
+        ctx.fill();
+        
+        // Тулья кепки
+        ctx.beginPath();
+        ctx.arc(
+            this.x + 30, 
+            this.y + headRadius - 2, 
+            headRadius * 0.9, 
+            Math.PI, 
+            0
+        );
+        ctx.fill();
+
+        // Логотип РЖД
+        ctx.fillStyle = '#FFFFFF';
+        ctx.font = 'bold 9px Arial';
+        ctx.textAlign = 'center';
+        ctx.fillText('РЖД', this.x + 30, this.y + headRadius + 2);
+
+        // ### Шея ###
+        ctx.fillStyle = '#E6C9A8'; // Темнее кожи
+        ctx.fillRect(
+            this.x + 28, 
+            this.y + headRadius * 2, 
+            4, 
+            neckLength
+        );
+
+        // ### Плечи и торс ###
+        // Куртка "Норникель"
+        ctx.fillStyle = '#000000';
+        // Левое плечо
+        ctx.beginPath();
+        ctx.ellipse(
+            this.x + 15, 
+            this.y + headRadius * 2 + neckLength, 
+            8, 
+            5, 
+            Math.PI/4, 0, Math.PI * 2
+        );
+        ctx.fill();
+        
+        // Правое плечо
+        ctx.beginPath();
+        ctx.ellipse(
+            this.x + 45, 
+            this.y + headRadius * 2 + neckLength, 
+            8, 
+            5, 
+            -Math.PI/4, 0, Math.PI * 2
+        );
+        ctx.fill();
+
+        // Торс
+        ctx.fillRect(
+            this.x + 15, 
+            this.y + headRadius * 2 + neckLength, 
+            shoulderWidth, 
+            torsoHeight
+        );
+
+        // Надпись "НОРНИКЕЛЬ" с эффектом кривизны
+        ctx.fillStyle = '#FFFFFF';
+        ctx.font = 'bold 6px Arial';
+        ctx.textAlign = 'center';
+        // Первая строка "НОРНИ"
+for (let i = 0; i < 5; i++) {
+    const letter = 'НОРНИ'[i];
+    const offsetY = Math.sin(i * 0.4) * 1.5; // Меньшая амплитуда волны
+    ctx.fillText(
+        letter,
+        this.x + 20 + i * 7, // Более плотное расположение букв
+        this.y + headRadius * 2 + neckLength + 18 + offsetY
+    );
+}
+
+// Вторая строка "КЕЛЬ"
+for (let i = 0; i < 4; i++) {
+    const letter = 'КЕЛЬ'[i];
+    const offsetY = Math.sin(i * 0.4) * 1.5;
+    ctx.fillText(
+        letter,
+        this.x + 22 + i * 7,
+        this.y + headRadius * 2 + neckLength + 26 + offsetY
+    );
+}
+
+        // ### Руки ###
+        // Левая рука с пачкой сигарет
+        ctx.fillStyle = '#F5D6B3';
+        ctx.beginPath();
+        ctx.roundRect(
+            this.x + 5, 
+            this.y + headRadius * 2 + neckLength + 5, 
+            10, 
+            armLength, 
+            [5]
+        );
+        ctx.fill();
+
+        // Пачка сигарет
+        ctx.fillStyle = '#3A2B1E';
+        ctx.beginPath();
+        ctx.roundRect(
+            this.x, 
+            this.y + headRadius * 2 + neckLength + 15, 
+            12, 
+            15, 
+            [3]
+        );
+        ctx.fill();
+
+        // Надпись "Captain Black"
+        ctx.fillStyle = '#FFFFFF';
+        ctx.font = 'italic 6px Arial';
+        ctx.fillText('Captain', this.x + 2, this.y + headRadius * 2 + neckLength + 22);
+        ctx.fillText('Black', this.x + 4, this.y + headRadius * 2 + neckLength + 28);
+
+        // Правая рука с сигаретой
+        ctx.fillStyle = '#F5D6B3';
+        ctx.beginPath();
+        ctx.roundRect(
+            this.x + 45, 
+            this.y + headRadius * 2 + neckLength + 5, 
+            10, 
+            armLength, 
+            [5]
+        );
+        ctx.fill();
+
+        // Сигарета
+        ctx.fillStyle = '#F8F8F8';
+        ctx.fillRect(
+            this.x + 55, 
+            this.y + headRadius * 2 + neckLength + 15, 
+            18, 
+            2
+        );
+        // Тлеющий конец
+        ctx.fillStyle = '#FF3300';
+        ctx.beginPath();
+        ctx.arc(
+            this.x + 73, 
+            this.y + headRadius * 2 + neckLength + 16, 
+            2, 
+            0, 
+            Math.PI * 2
+        );
+        ctx.fill();
+        // Дым (если игрок движется)
+        if (Math.abs(this.vx) > 0) {
+            ctx.fillStyle = 'rgba(200, 200, 200, 0.4)';
+            ctx.beginPath();
+            ctx.ellipse(
+                this.x + 74 + Math.sin(Date.now()/200) * 2, 
+                this.y + headRadius * 2 + neckLength + 10, 
+                4, 
+                8, 
+                Math.PI/4, 
+                0, 
+                Math.PI
+            );
+            ctx.fill();
+        }
+
+        // ### Шорты ###
+        ctx.fillStyle = '#CC0000';
+        ctx.beginPath();
+        ctx.moveTo(this.x + 15, this.y + headRadius * 2 + neckLength + torsoHeight);
+        ctx.lineTo(this.x + 15, this.y + headRadius * 2 + neckLength + torsoHeight + 25);
+        ctx.lineTo(this.x + 25, this.y + headRadius * 2 + neckLength + torsoHeight + 25);
+        ctx.lineTo(this.x + 30, this.y + headRadius * 2 + neckLength + torsoHeight + 15);
+        ctx.lineTo(this.x + 35, this.y + headRadius * 2 + neckLength + torsoHeight + 25);
+        ctx.lineTo(this.x + 45, this.y + headRadius * 2 + neckLength + torsoHeight + 25);
+        ctx.lineTo(this.x + 45, this.y + headRadius * 2 + neckLength + torsoHeight);
+        ctx.closePath();
+        ctx.fill();
+
+        // Ремень
+        ctx.fillStyle = '#2A190E';
+        ctx.fillRect(
+            this.x + 15, 
+            this.y + headRadius * 2 + neckLength + torsoHeight, 
+            shoulderWidth, 
+            3
+        );
+
+        // ### Ноги ###
+        // Левая нога
+        ctx.fillStyle = '#F5D6B3';
+        ctx.fillRect(
+            this.x + 18, 
+            this.y + headRadius * 2 + neckLength + torsoHeight + 25, 
+            9, 
+            legLength
+        );
+        
+        // Правая нога
+        ctx.fillRect(
+            this.x + 33, 
+            this.y + headRadius * 2 + neckLength + torsoHeight + 25, 
+            9, 
+            legLength
+        );
+
+        // ### Кроссовки ###
+        ctx.fillStyle = '#333333';
+        // Левый
+        ctx.beginPath();
+        ctx.roundRect(
+            this.x + 15, 
+            this.y + headRadius * 2 + neckLength + torsoHeight + 25 + legLength, 
+            12, 
+            8, 
+            [3]
+        );
+        ctx.fill();
+        // Правый
+        ctx.beginPath();
+        ctx.roundRect(
+            this.x + 30, 
+            this.y + headRadius * 2 + neckLength + torsoHeight + 25 + legLength, 
+            12, 
+            8, 
+            [3]
+        );
+        ctx.fill();
+
+        // ### Лицо (детализированное) ###
+        // Глаза
+        ctx.fillStyle = '#3A2B1E';
+        ctx.beginPath();
+        ctx.arc(
+            this.x + 25, 
+            this.y + headRadius - 2, 
+            2, 
+            0, 
+            Math.PI * 2
+        );
+        ctx.arc(
+            this.x + 35, 
+            this.y + headRadius - 2, 
+            2, 
+            0, 
+            Math.PI * 2
+        );
+        ctx.fill();
+        
+        // Рот
+        ctx.strokeStyle = '#3A2B1E';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.arc(
+            this.x + 30, 
+            this.y + headRadius + 5, 
+            4, 
+            Math.PI * 0.1, 
+            Math.PI * 0.9
+        );
+        ctx.stroke();
+
+        // Тень от кепки на лице
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.1)';
+        ctx.beginPath();
+        ctx.arc(
+            this.x + 30, 
+            this.y + headRadius + 2, 
+            headRadius * 0.8, 
+            Math.PI, 
+            Math.PI * 2
+        );
+        ctx.fill();
+
+        ctx.restore();
+
+        // Отрисовка жизней
+        this.drawLives();
+    }
+    drawHeart(x, y, size, color) {
+    ctx.save();
+    ctx.fillStyle = color;
     ctx.beginPath();
-    ctx.ellipse(this.x + 30, this.y + 10, 20, 25, 0, 0, Math.PI * 2);
-    ctx.fill();
-
-    ctx.fillStyle = '#800000';
-    ctx.beginPath();
-    ctx.moveTo(this.x + 10, this.y - 5);
-    ctx.lineTo(this.x + 50, this.y - 5);
-    ctx.lineTo(this.x + 40, this.y + 15);
-    ctx.lineTo(this.x + 20, this.y + 15);
+    ctx.moveTo(x + size/2, y + size/4);
+    ctx.bezierCurveTo(x + size, y, x + size, y + size/2, x + size/2, y + size);
+    ctx.bezierCurveTo(x, y + size/2, x, y, x + size/2, y + size/4);
     ctx.closePath();
     ctx.fill();
-
-    ctx.fillStyle = 'white';
-    ctx.font = 'bold 10px Arial';
-    ctx.fillText('РЖД', this.x + 30, this.y + 5);
-
-    ctx.fillStyle = 'black';
-    ctx.beginPath();
-    ctx.ellipse(this.x + 20, this.y + 5, 5, 3, 0, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.beginPath();
-    ctx.ellipse(this.x + 40, this.y + 5, 5, 3, 0, 0, Math.PI * 2);
-    ctx.fill();
-
-    ctx.fillStyle = '#5d3a7d';
-    ctx.fillRect(this.x + 5, this.y + 50, 15, 25);
-    ctx.fillStyle = 'white';
-    ctx.font = '8px Arial';
-    ctx.textAlign = 'center';
-    ctx.fillText('CB', this.x + 12, this.y + 65);
-
-    ctx.fillStyle = 'white';
-    ctx.fillRect(this.x + 55, this.y + 70, 15, 4);
-    ctx.fillStyle = 'orange';
-    ctx.fillRect(this.x + 55, this.y + 70, 5, 4);
-
-    ctx.fillStyle = 'black';
-    ctx.fillRect(this.x + 15, this.y + 80, 15, 20);
-    ctx.fillRect(this.x + 35, this.y + 80, 15, 20);
+    
+    // Обводка для лучшей видимости
+    ctx.strokeStyle = 'rgba(0,0,0,0.5)';
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.restore();
+  }
+drawLives() {
+    // Рисуем полупрозрачный фон для жизней
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
+    ctx.fillRect(
+      WIDTH - 180, 10, 
+      170, 34
+    );
+    
+    // Рисуем сердца
+    this.hearts.forEach((heart, index) => {
+      if (index < this.lives) {
+        this.drawHeart(heart.x, heart.y, heart.size, 'red');
+      }
+    });
   }
 update(deltaTime) {
+  
   this.x += this.vx * deltaTime;
-
+  if (this.x > WIDTH) {
+    this.x = -this.width;
+  } 
+  else if (this.x + this.width < 0) {
+    this.x = WIDTH;
+  }
+  if (this.invulnerable) {
+      this.invulnerableTimer += deltaTime;
+      if (this.invulnerableTimer >= this.invulnerableDuration) {
+        this.invulnerable = false;
+        this.blinkEffect = false;
+      }
+    }
   if (this.x > canvas.width) this.x = -this.width;
   if (this.x + this.width < 0) this.x = canvas.width;
+
+  if (this.currentPlatform?.isDestructible && 
+    this.currentPlatform.damageProgress > 0.7) {
+  this.fallThroughTimer += deltaTime;
+  if (this.fallThroughTimer >= this.maxFallThroughTime) {
+    this.onPlatform = false;
+    this.currentPlatform = null;
+  }
+} else {
+  this.fallThroughTimer = 0;
+}
 
   this.vy += this.gravity * deltaTime;
   this.y += this.vy * deltaTime;
 
-  this.onPlatform = false;
-
-  for(let plat of platforms) {
+    this.onPlatform = false;
+     this.wasOnPlatform = (this.currentPlatform !== null);
+    for(let plat of platforms) {
     if(this.vy > 0 &&
        this.x + this.width > plat.x &&
        this.x < plat.x + plat.width &&
        this.y + this.height > plat.y &&
        this.y + this.height < plat.y + plat.height + this.vy * deltaTime) {
-      this.y = plat.y - this.height;
-      this.vy = 0;
-      this.onPlatform = true;
-      if(!this.firstJumpDone) {
-        this.firstJumpDone = false;
-      }
+        if (plat.isDestructible && plat.damageProgress > 0.99) continue;
+        this.y = plat.y - this.height;
+        this.vy = 0;
+        this.onPlatform = true;
+        this.canJump = true;
+        this.currentPlatform = plat; // Запоминаем текущую платформу
     }
   }
-
-  if(this.y > HEIGHT + 100) {
-    gameOver = true;
-  }
-}
-jump() {
-  if(this.onPlatform || !this.firstJumpDone) {
-    this.vy = -this.jumpPower;
-  }
+    if(!this.onPlatform && this.wasOnPlatform) {
+      this.currentPlatform = null;
+    }
 }
 
+ jump() {
+    if (this.canJump && (this.onPlatform || !this.hasJumpedOnce)) {
+      this.vy = -this.jumpPower;
+      this.canJump = false;
+      this.hasJumpedOnce = true; // Отмечаем первый прыжок
+    }
+  }
+autoJump() {
+  if (this.hasJumpedOnce && this.onPlatform) {
+    const currentPlatform = platforms.find(plat => 
+      this.y + this.height >= plat.y - 5 && 
+      this.y + this.height <= plat.y + 5 &&
+      this.x + this.width > plat.x &&
+      this.x < plat.x + plat.width
+    );
+    
+    // Прыгаем в любом случае, если платформа разрушается
+    if (currentPlatform?.isDestructible && currentPlatform.isDestroying) {
+      this.vy = -this.jumpPower * 0.8; // Чуть слабее прыжок
+      this.canJump = false;
+      return;
+    }
+    
+    // Оригинальная логика для обычных платформ
+    if (!currentPlatform?.isDestructible || 
+       (currentPlatform.isDestructible && currentPlatform.damageProgress < 0.7)) {
+      this.vy = -this.jumpPower;
+      this.canJump = false;
+    }
+  }
 }
+}
+
+
+
 class Enemy {
   constructor(x, y, type, vx) {
     this.x = x;
@@ -322,11 +761,9 @@ class Enemy {
     this.width = 90;
     this.height = 30;
     this.type = type;
-    this.vx = vx !== undefined ? vx : (200 + Math.random() * 400) * (Math.random() < 0.5 ? 1 : -1);
-    console.log(`Enemy speed: ${this.vx}`);
+    this.vx = vx !== undefined ? vx : (100 + Math.random() * 200) * (Math.random() < 0.5 ? 1 : -1);
   }
 update(deltaTime) {
-  console.log(`Speed: ${this.vx}, deltaTime: ${deltaTime}, move: ${this.vx * deltaTime}`);
   this.x += this.vx * deltaTime;
 
   if (this.x < 0) {
@@ -707,7 +1144,7 @@ drawBoat() {
 
 let player;
 let platforms = [];
-let Enemies = [];
+let enemies = [];
 
 const enemyTypes = ['salad', 'bone', 'azbuka', 'boat'];
 let lastEnemyTypes = [];
@@ -739,8 +1176,6 @@ function generateEnemies(count) {
       if (attempts > 100) break; // избегаем вечного цикла
     } while (tooClose);
 
-    let speed = 0.5 + Math.random() * 1.5;
-
     // Выбираем тип врага, избегая 3 подряд одинаковых
     let availableTypes = [...enemyTypes];
     if (
@@ -756,133 +1191,244 @@ function generateEnemies(count) {
     lastEnemyTypes.push(type);
     if (lastEnemyTypes.length > 2) lastEnemyTypes.shift();
 
-    enemiesArray.push(new Enemy(x, y, type, speed));
+    enemiesArray.push(new Enemy(x, y, type));
   }
 
   return enemiesArray;
 }
 
+function lerp(a, b, t) {
+    return a + (b - a) * t;
+}
 
 function initGame() {
   player = new Player();
+  player.lives = 3; 
   platforms = [];
-
-  // Платформа прямо под игроком (чтобы он не падал)
+  enemies = generateEnemies(3); 
+  score = 0;
+  visualScore = 0;
+  totalHeight = 0;
+  lastPlayerY = HEIGHT;
+  maxHeightReached = HEIGHT; // Начинаем с нижней точки (высота canvas)
+  baseHeight = HEIGHT; // 
+  player.hasJumpedOnce = false;
+  player.currentPlatform = null;
+  // Платформа под игроком
   platforms.push(new Platform(player.x, player.y + player.height));
 
-  // Остальные платформы сверху
+  // Настройки генерации платформ:
+  const PLATFORM_COUNT = 11; // Увеличили с ~7 до 30 платформ
+  const MIN_VERTICAL_DIST = 80; // Минимальное расстояние по вертикали (было 150)
+  const MAX_VERTICAL_DIST = 120; // Максимальное расстояние
+  
   let y = HEIGHT - 150;
-  while(y > -100) {
-    let x = Math.random() * (WIDTH - 90);
-    platforms.push(new Platform(x, y));
-    y -= 150;
+  
+  for (let i = 0; i < PLATFORM_COUNT; i++) {
+    // Случайный интервал между платформами
+    y -= MIN_VERTICAL_DIST + Math.random() * (MAX_VERTICAL_DIST - MIN_VERTICAL_DIST);
+    
+    // Позиция по X (с отступами от краев)
+    let x = 45 + Math.random() * (WIDTH - 180);
+    
+    // 15% chance что платформа разрушаемая
+    let isDestructible = Math.random() < 0.75;
+    
+    platforms.push(new Platform(x, y, isDestructible));
+    
+    // 25% chance добавить вторую платформу на этом уровне
+    if(Math.random() < 0.25 && i < PLATFORM_COUNT - 1) {
+      let x2;
+      do {
+        x2 = 45 + Math.random() * (WIDTH - 180);
+      } while(Math.abs(x2 - x) < 200); // Чтобы не пересекались
+      
+      platforms.push(new Platform(x2, y, Math.random() < 0.15));
+      i++; // Учитываем добавленную платформу
+    }
   }
+
   score = 0;
   scoreDiv.style.display = 'block';
   scoreDiv.textContent = `Очки: ${score}`;
   gameOver = false;
 }
-let lastFrameTime = null;
-requestAnimationFrame(gameLoop);
+  
+let lastFrameTime = 0;
+let smoothedDeltaTime = 1 / 60; 
+const maxDeltaTime = 0.05; 
+
+function checkCollision(player, enemy) {
+  return player.x < enemy.x + enemy.width &&
+         player.x + player.width > enemy.x &&
+         player.y < enemy.y + enemy.height &&
+         player.y + player.height > enemy.y;
+}
 
 function gameLoop(currentTime) {
-  // if (!lastFrameTime) {
-  //   lastFrameTime = currentTime;
-  //   requestAnimationFrame(gameLoop); // запускаем следующий кадр
-  //   return; // пропускаем расчёты
-  // }
-  if (!lastFrameTime) lastFrameTime = currentTime - 16.67;
+   if (!lastFrameTime) {
+    lastFrameTime = currentTime;
+  }
+  const currentHeight = player.y;
   const deltaTime = (currentTime - lastFrameTime) / 1000;
   lastFrameTime = currentTime;
 
-  // Проверка на случай NaN
-  if (isNaN(deltaTime)) {
-    console.warn('deltaTime is NaN, skipping frame');
-    requestAnimationFrame(gameLoop);
-    return;
-  }
+  if (!gameStarted || gameOver) return;
 
-  if (gameOver) {
-    scoreDiv.style.display = 'none';
-    gameOverScreen.style.display = 'flex';
-    return; 
-  }
-
-  ctx.clearRect(0, 0, WIDTH, HEIGHT);
-
-  player.update(deltaTime)
-  console.log(player.x, player.y)
-
-  if (player.firstJumpDone && player.onPlatform) {
-    player.jump();
-  }
-
-  if (player.y < HEIGHT / 2) {
-    let diff = HEIGHT / 2 - player.y;
-    player.y = HEIGHT / 2;
-
-    for (let i = platforms.length - 1; i >= 0; i--) {
-      let plat = platforms[i];
-      plat.y += diff;
-
-      // Проверяем, стоит ли игрок на платформе
-      const playerOnPlatform = (player.x + player.width > plat.x) &&
-                               (player.x < plat.x + plat.width) &&
-                               (player.y + player.height >= plat.y) &&
-                               (player.y + player.height <= plat.y + 5) &&
-                               (player.vy >= 0);
-
-      // Обновляем платформу, если true — значит разрушилась
-      if (plat.update(deltaTime, playerOnPlatform)) {
-        platforms.splice(i, 1);
-        score++;
-        scoreDiv.textContent = `Очки: ${score}`;
-        continue;
-      }
-
-      // Если платформа вышла за экран, перемещаем наверх и обновляем параметры
-      if (plat.y > HEIGHT) {
-        plat.y = -30;
-        plat.x = Math.random() * (WIDTH - plat.width);
-        plat.isDestructible = Math.random() < 1 / 15;
-        plat.playerOnTime = 0;
-        plat.damageProgress = 0;
-      }
+  if (currentHeight < maxHeightReached) {
+        const heightDifference = maxHeightReached - currentHeight; // Насколько выше стал
+        score += heightDifference * 0.5; // Коэффициент (можно настроить)
+        maxHeightReached = currentHeight; // Обновляем рекорд
+        
+        // Эффект при обновлении счёта
+        scoreDiv.classList.add('bounce');
+        setTimeout(() => scoreDiv.classList.remove('bounce'), 200);
     }
 
-    // Аналогично сдвигаем врагов
-   for (let enemy of enemies) {
-    enemy.y += diff;
-      if (enemy.y > HEIGHT) {
-          enemy.y = -30;
-    enemy.x = Math.random() * (WIDTH - enemy.width);
-    enemy.vx = (Math.random() * 400 + 200) * (Math.random() < 0.5 ? 1 : -1);
+
+  // Проверка на выход за нижнюю границу экрана
+  if (player.y > HEIGHT) {
+    gameOver = true;
+    scoreDiv.style.display = 'none';
+    gameOverScreen.style.display = 'flex';
+    return;
   }
+  document.getElementById('livesCount').textContent = player.lives;
+  // Очистка экрана
+  ctx.clearRect(0, 0, WIDTH, HEIGHT);
+
+  // Обработка управления
+  handleMovement();
+  
+if (player.y < lastPlayerY) {
+        const heightDiff = lastPlayerY - player.y;
+        totalHeight += heightDiff;
+        score = Math.floor(totalHeight * heightScoreMultiplier);
+        
+        // Эффект при обновлении счета
+        scoreDiv.classList.add('bounce');
+        setTimeout(() => scoreDiv.classList.remove('bounce'), 200);
+    }
+    lastPlayerY = player.y;
+
+  // Обновление игрока
+  player.update(deltaTime);
+  if (!player.invulnerable) {
+    enemies.forEach(enemy => {
+      if (checkCollision(player, enemy)) {
+        if (player.loseLife()) {
+          // Отбрасывание игрока при ударе
+          player.vy = -300;
+          
+          if (player.lives <= 0) {
+            endGame();
+          }
+        }
+      }
+    });
 }
+// if (scoreAnimationFrame) cancelAnimationFrame(scoreAnimationFrame);
+
+function animateScore() {
+    const diff = score - visualScore;
+    if (Math.abs(diff) > 1) {
+        visualScore += diff * 0.1;
+        scoreDiv.textContent = `Очки: ${Math.floor(visualScore)}`;
+        scoreAnimationFrame = requestAnimationFrame(animateScore);
+    } else {
+        visualScore = score;
+        scoreDiv.textContent = `Очки: ${Math.floor(visualScore)}`;
+    }
 }
-  // Обновляем врагов
-  for (let enemy of enemies) {
-    enemy.update(deltaTime);
+// animateScore();
+// Плавное обновление визуального счета
+if (Math.abs(visualScore - score) > 1) {
+    visualScore += (score - visualScore) * SCORE_SPEED;
+} else {
+    visualScore = score;
+}
+scoreDiv.textContent = `Очки: ${Math.floor(visualScore)}`;
+  let playerOnPlatform = false;
+   // Обработка платформ
+for (let i = platforms.length - 1; i >= 0; i--) {
+  const plat = platforms[i];
+  const isCurrent = (player.currentPlatform === plat);
+
+  // Запускаем разрушение при любом контакте с разрушаемой платформой после первого прыжка
+  if (isCurrent && plat.isDestructible && player.hasJumpedOnce) {
+    plat.startDestruction();
   }
 
-  // Рисуем платформы
-  for (let plat of platforms) {
-    plat.draw();
+  // Обновляем состояние разрушения
+  if (plat.isDestructible && plat.isDestroying) {
+    if (plat.update(deltaTime)) {
+      platforms.splice(i, 1);
+      score += 10;
+      scoreDiv.textContent = `Очки: ${score}`;
+      if (isCurrent) {
+        player.vy = -400;
+        player.currentPlatform = null;
+      }
+    }
   }
+}
+
+  // Автопрыжок после первого прыжка
+  if (player.hasJumpedOnce && player.onPlatform) {
+    player.autoJump();
+  }
+
+  // Прокрутка мира
+  if (player.y < HEIGHT / 2) {
+    const diff = HEIGHT / 2 - player.y;
+    player.y = HEIGHT / 2;
+
+    // Сдвигаем все платформы
+    platforms.forEach(plat => {
+        plat.y += diff;
+        
+        // Перемещаем платформы, вышедшие за экран
+        if (plat.y > HEIGHT) {
+            plat.y = -30;
+            plat.x = Math.random() * (WIDTH - plat.width);
+            plat.isDestructible = Math.random() < 0.15;
+            plat.damageProgress = 0;
+        }
+    });
+
+    // Сдвигаем врагов
+    enemies.forEach(enemy => {
+        enemy.y += diff;
+        if (enemy.y > HEIGHT) {
+            enemy.y = -50;
+            enemy.x = Math.random() * (WIDTH - enemy.width);
+            enemy.vx = (Math.random() * 200 + 100) * (Math.random() < 0.5 ? 1 : -1);
+        }
+    });
+  }
+
+  // Обновляем врагов
+  enemies.forEach(enemy => {
+    enemy.update(deltaTime);
+  });
+
+  // Рисуем платформы
+platforms.forEach(plat => {
+  const isCurrent = (player.currentPlatform === plat);
+  plat.draw(isCurrent);
+});
+
+  // Рисуем врагов
+  enemies.forEach(enemy => {
+    enemy.draw();
+  });
 
   // Рисуем игрока
   player.draw();
 
-  // Рисуем врагов
-  for (let enemy of enemies) {
-    enemy.draw();
-  }
-
   // Запускаем следующий кадр
   requestAnimationFrame(gameLoop);
 }
-
- requestAnimationFrame(gameLoop);
 // Управление
 
 const leftBtn = document.getElementById('leftBtn');
@@ -913,17 +1459,21 @@ leftBtn.addEventListener('touchend', e => { e.preventDefault(); leftPressed = fa
 rightBtn.addEventListener('touchstart', e => { e.preventDefault(); rightPressed = true; });
 rightBtn.addEventListener('touchend', e => { e.preventDefault(); rightPressed = false; });
 
-// Прыжок по тапу на экран (только первый прыжок)
 canvas.addEventListener('touchstart', e => {
-  if(!player.firstJumpDone) {
+  if(!player.hasJumpedOnce) {
     player.jump();
   }
   e.preventDefault();
 });
 
-// Поддержка мыши (для теста на ПК)
 canvas.addEventListener('mousedown', e => {
-  if(!player.firstJumpDone) {
+  if(!player.hasJumpedOnce) {
+    player.jump();
+  }
+});
+
+document.addEventListener('keydown', e => {
+  if((e.code === 'ArrowUp' || e.code === 'Space') && !player.hasJumpedOnce) {
     player.jump();
   }
 });
@@ -939,37 +1489,55 @@ function handleMovement() {
   }
 }
 
+function checkPlayerPlatformContact(player, platform) {
+  return (
+    player.y + player.height >= platform.y - 5 &&
+    player.y + player.height <= platform.y + 5 &&
+    player.x + player.width > platform.x &&
+    player.x < platform.x + platform.width &&
+    player.vy >= 0
+  );
+}
+
+function handlePlatformContact(player, platform) {
+  player.y = platform.y - player.height;
+  player.vy = 0;
+  player.onPlatform = true;
+  player.canJump = true;
+}
+
+function endGame() {
+  gameOver = true;
+  scoreDiv.style.display = 'none';
+  gameOverScreen.style.display = 'flex';
+  document.querySelector('#gameOverScreen div').textContent = `Игра окончена! Очки: ${score}`;
+}
+
 // Запуск игры
 
 startBtn.onclick = () => {
   startScreen.style.display = 'none';
   loadingScreen.style.display = 'flex';
-
   setTimeout(() => {
     loadingScreen.style.display = 'none';
     gameStarted = true;
+    gameOver = false;
     initGame();
-    gameOverScreen.style.display = 'none';
-    scoreDiv.style.display = 'block';
-
-    // Показываем мобильные кнопки, если мобильное устройство
+    
     if(/Mobi|Android/i.test(navigator.userAgent)) {
       document.getElementById('mobileControls').style.display = 'block';
     }
 
-    // Запускаем цикл
+    // Запускаем игровой цикл правильно:
+    lastFrameTime = 0;
     function loop() {
-      if(!gameOver) {
-        handleMovement();
-        gameLoop();
+      if(gameStarted && !gameOver) {
         requestAnimationFrame(loop);
-      } else {
-        scoreDiv.style.display = 'none';
-        gameOverScreen.style.display = 'flex';
+        gameLoop(performance.now()); // Явно передаем текущее время
       }
     }
-    loop(); 
-  }, 1000); // добавил 1000мс задержки, чтобы loadingScreen был виден
+    loop();
+  }, 1000);
 };
 
 restartBtn.onclick = () => {
@@ -981,8 +1549,8 @@ restartBtn.onclick = () => {
   // Снова запускаем игровой цикл
   function loop() {
     if(!gameOver) {
+      gameLoop(performance.now());
       handleMovement();
-      gameLoop();
       requestAnimationFrame(loop);
     } else {
       scoreDiv.style.display = 'none';
@@ -991,7 +1559,6 @@ restartBtn.onclick = () => {
   }
   loop();
 };
-enemies = generateEnemies(2);
 
 </script>
 </body>
